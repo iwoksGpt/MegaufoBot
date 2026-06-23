@@ -14,6 +14,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "")
 
 # TMDB API key
 TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
+MOVIE_API_PROVIDER = os.getenv("MOVIE_API_PROVIDER", "imdb").lower()
 
 DATABASE_FILE = os.getenv("DATABASE_FILE", "data/movie_bot.db")
 
@@ -49,7 +50,7 @@ def validate_config() -> None:
     missing = []
     if not TELEGRAM_TOKEN:
         missing.append("TELEGRAM_TOKEN")
-    if not TMDB_API_KEY:
+    if MOVIE_API_PROVIDER == "tmdb" and not TMDB_API_KEY:
         missing.append("TMDB_API_KEY")
     if missing:
         joined = ", ".join(missing)

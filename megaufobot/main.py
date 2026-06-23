@@ -2,9 +2,10 @@ import telebot
 import time
 import re
 from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-from .config import TELEGRAM_TOKEN, WELCOME_MESSAGE, HELP_MESSAGE, validate_config
+from .config import TELEGRAM_TOKEN, WELCOME_MESSAGE, HELP_MESSAGE, MOVIE_API_PROVIDER, validate_config
 from .database import Database
 from .tmdb_api import TMDbAPI
+from .imdb_api import IMDbAPI
 from .keyboards import Keyboards
 from .messages import Messages
 from .admin_panel import AdminPanel
@@ -14,7 +15,7 @@ validate_config()
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 
 db = Database()
-tmdb = TMDbAPI()
+tmdb = IMDbAPI() if MOVIE_API_PROVIDER == "imdb" else TMDbAPI()
 keyboards = Keyboards()
 admin_panel = AdminPanel(bot)
 
@@ -531,7 +532,7 @@ def handle_callback(call):
     elif data.startswith("details_"):
         parts = data.split("_")
         media_type = parts[1]
-        media_id = int(parts[2])
+        media_id = parts[2]
         
         if media_type == "movie":
             movie = tmdb.get_movie_details(media_id)
@@ -672,7 +673,7 @@ def handle_callback(call):
         
         if len(parts) == 3:  
             media_type = parts[1]
-            media_id = int(parts[2])
+            media_id = parts[2]
             
             user_states[user_id] = STATE_RATE
             
@@ -696,7 +697,7 @@ def handle_callback(call):
         
         elif len(parts) == 4:  
             media_type = parts[1]
-            media_id = int(parts[2])
+            media_id = parts[2]
             rating = int(parts[3])
             
             db.add_rating(user_id, media_id, media_type, rating)
@@ -727,7 +728,7 @@ def handle_callback(call):
                 return
                 
             media_type = parts[1]
-            media_id = int(parts[2])
+            media_id = parts[2]
             
             title = ""
             recommendations = None
@@ -1110,7 +1111,7 @@ def handle_callback(call):
             return
             
         media_type = parts[1]
-        media_id = int(parts[2])
+        media_id = parts[2]
         
         title = ""
         poster_path = ""
@@ -1143,7 +1144,7 @@ def handle_callback(call):
             return
             
         media_type = parts[1]
-        media_id = int(parts[2])
+        media_id = parts[2]
         
         title = ""
         if media_type == "movie":
@@ -1224,7 +1225,7 @@ def handle_callback(call):
             return
             
         media_type = parts[2]
-        media_id = int(parts[3])
+        media_id = parts[3]
         
         if media_type == "movie":
             movie = tmdb.get_movie_details(media_id)
@@ -1330,7 +1331,7 @@ def handle_callback(call):
                 return
                 
             media_type = parts[1]
-            media_id = int(parts[2])
+            media_id = parts[2]
             
             if media_type == "movie":
                 movie = tmdb.get_movie_details(media_id)
@@ -1427,7 +1428,7 @@ def handle_callback(call):
                 return
                 
             media_type = parts[1]
-            media_id = int(parts[2])
+            media_id = parts[2]
             
             if media_type == "movie":
                 movie = tmdb.get_movie_details(media_id)
@@ -1529,7 +1530,7 @@ def handle_callback(call):
     elif data.startswith("backdrops_"):
         parts = data.split("_")
         media_type = parts[1]
-        media_id = int(parts[2])
+        media_id = parts[2]
         
         try:
             if media_type == "movie":
@@ -1610,7 +1611,7 @@ def handle_callback(call):
     elif data.startswith("backdrop_"):
         parts = data.split("_")
         media_type = parts[1]
-        media_id = int(parts[2])
+        media_id = parts[2]
         image_index = int(parts[3])
         
         try:
@@ -1692,7 +1693,7 @@ def handle_callback(call):
     elif data.startswith("images_"):
         parts = data.split("_")
         media_type = parts[1]
-        media_id = int(parts[2])
+        media_id = parts[2]
         
         if media_type == "movie":
             movie = tmdb.get_movie_details(media_id)
@@ -1773,7 +1774,7 @@ def handle_callback(call):
     elif data.startswith("image_"):
         parts = data.split("_")
         media_type = parts[1]
-        media_id = int(parts[2])
+        media_id = parts[2]
         image_index = int(parts[3])
         
         if media_type == "movie":
@@ -1871,7 +1872,7 @@ def handle_callback(call):
     elif data.startswith("more_info_"):
         parts = data.split("_")
         media_type = parts[2]
-        media_id = int(parts[3])
+        media_id = parts[3]
         
         if media_type == "movie":
             movie = tmdb.get_movie_details(media_id)
@@ -1963,7 +1964,7 @@ def handle_callback(call):
                 return
                 
             media_type = parts[2]
-            media_id = int(parts[3])
+            media_id = parts[3]
             
             if media_type == "movie":
                 movie = tmdb.get_movie_details(media_id)
@@ -2119,7 +2120,7 @@ def handle_callback(call):
                 return
                 
             media_type = parts[1]  
-            media_id = int(parts[2])
+            media_id = parts[2]
             page = 1
             if len(parts) >= 4 and parts[3].isdigit():
                 page = int(parts[3])
