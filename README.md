@@ -1,66 +1,100 @@
-# MegaufoBot
+# MegaufoBot — Cloudflare Telegram Bot
 
-ربات تلگرام پیشنهاد فیلم و سریال با Python، `pyTelegramBotAPI`، دیتابیس SQLite و API سایت TMDB.
+Cloudflare Worker + TypeScript + D1 Telegram bot using the free IMDb API at `https://imdbapi.dev/`.
 
-## ساختار پروژه
+## Features
+
+- Telegram webhook; no polling process needed
+- IMDb title search
+- Movie/TV detail cards
+- Favorites stored in Cloudflare D1
+- User ratings stored in D1
+- Admin stats panel
+- Secure secrets via Cloudflare Secrets
+
+## Setup
+
+### 1. Install dependencies
+
+```bash
+npm install
+```
+
+### 2. Create D1 database
+
+```bash
+npx wrangler d1 create megaufobot-db
+```
+
+Copy the returned `database_id` into `wrangler.jsonc` in place of:
 
 ```text
-MegaufoBot/
-├── main.py                  # لانچر ساده پروژه
-├── megaufobot/
-│   ├── main.py              # فایل اصلی ربات و handlerها
-│   ├── config.py            # تنظیمات و متغیرهای محیطی
-│   ├── database.py          # SQLite database layer
-│   ├── tmdb_api.py          # ارتباط با TMDB API
-│   ├── keyboards.py         # کیبوردها و inline keyboardها
-│   ├── messages.py          # متن‌ها و پیام‌های ثابت
-│   └── admin_panel.py       # پنل مدیریت
-├── data/                    # محل دیتابیس SQLite
-├── requirements.txt
-└── .env.example
+REPLACE_WITH_D1_DATABASE_ID
 ```
 
-## راه‌اندازی
+### 3. Apply migrations
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
+npm run db:migrate:remote
 ```
 
-سپس داخل `.env` مقدارهای زیر را تنظیم کن:
-
-```env
-TELEGRAM_TOKEN=توکن BotFather
-TMDB_API_KEY=کلید TMDB
-ADMIN_IDS=123456789,987654321
-```
-
-## اجرا
+For local development:
 
 ```bash
-python main.py
+npm run db:migrate:local
 ```
 
-یا:
+### 4. Set Cloudflare secrets
 
 ```bash
-python -m megaufobot.main
+npx wrangler secret put TELEGRAM_TOKEN
+npx wrangler secret put ADMIN_IDS
+npx wrangler secret put WEBHOOK_SECRET
 ```
 
-## قابلیت‌های فعلی
+Use your admin ID for `ADMIN_IDS`:
 
-- جستجوی فیلم، سریال و بازیگر
-- نمایش جزئیات فیلم و سریال از TMDB
-- نمایش پوستر، تریلر، بازیگران و تصاویر
-- لیست علاقه‌مندی‌ها
-- امتیازدهی کاربر
-- پیشنهادات مشابه
-- ترندهای روز/هفته
-- تنظیمات کاربر
-- پنل مدیریت شامل آمار، کاربران و ارسال پیام همگانی
+```text
+YOUR_TELEGRAM_NUMERIC_ID
+```
 
-## نکته امنیتی
+`WEBHOOK_SECRET` should be a random string used in the webhook path.
 
-هیچ توکن یا API Key نباید داخل فایل‌های `.py` کامیت شود. همه کلیدها از `.env` خوانده می‌شوند.
+### 5. Deploy
+
+```bash
+npm run deploy
+```
+
+### 6. Register Telegram webhook
+
+After deploy, set:
+
+```bash
+export TELEGRAM_TOKEN='YOUR_BOT_TOKEN'
+export WORKER_URL='https://megaufobot.YOUR_SUBDOMAIN.workers.dev'
+export WEBHOOK_SECRET='same-secret-you-set-in-cloudflare'
+npm run set-webhook
+```
+
+Health check:
+
+```text
+https://megaufobot.YOUR_SUBDOMAIN.workers.dev/health
+```
+
+## Local dev
+
+Create `.dev.vars` from `.dev.vars.example` and put your local secrets there.
+
+```bash
+cp .dev.vars.example .dev.vars
+npm run db:migrate:local
+npm run dev
+```
+
+Then use a tunnel or deployed worker for Telegram webhook testing.
+
+## Security
+
+Never commit Telegram bot token. Use Cloudflare Secrets and local `.dev.vars` only.
