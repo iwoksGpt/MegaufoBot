@@ -57,6 +57,15 @@ export class TelegramAPI {
       text
     });
   }
+
+  setMessageReaction(chatId: number, messageId: number, emoji: string, isBig = false) {
+    return this.call('setMessageReaction', {
+      chat_id: chatId,
+      message_id: messageId,
+      reaction: [{ type: 'emoji', emoji }],
+      is_big: isBig
+    }).catch(() => undefined);
+  }
 }
 
 export function keyboard(rows: InlineKeyboardButton[][]): ReplyMarkup {
