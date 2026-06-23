@@ -1,115 +1,65 @@
-import type { Env, TelegramCallbackQuery, TelegramMessage, TelegramUpdate, ImdbTitle } from './types';
+import type { AiMovieDetails, Env, ImdbTitle, TelegramCallbackQuery, TelegramMessage, TelegramUpdate } from './types';
 import { TelegramAPI } from './telegram';
 import { t, type Lang } from './messages';
 import { adminMenu, adminUserActions, mainMenu, popularMenu, profileKeyboard, ratingKeyboard, titleActions } from './keyboards';
-import { displayTitle, getTitle, image, listCredits, listPopular, mediaType, rating, searchTitles, year } from './imdb';
-import { persianDisplayName, resolveQueryAlias } from './aliases';
+import { displayTitle, getTitle, image, listCredits, listPopular, mediaType, ratingNumber, searchTitles, year } from './imdb';
+import { enrichMovie, loadingDetails } from './ai';
+import { resolveQueryAlias } from './aliases';
 import {
-  addFavorite,
-  addUser,
-  allActiveUserIds,
-  clearAdminSession,
-  getAdminSession,
-  getUserLang,
-  getUserProfile,
-  incrementStats,
-  isBlocked,
-  isFavorite,
-  listFavorites,
-  listUsers,
-  logSearch,
-  recentSearchLogs,
-  removeFavorite,
-  saveRating,
-  setAdminSession,
-  setBlocked,
-  setUserLang,
-  stats
+  addFavorite, addUser, allActiveUserIds, clearAdminSession, getAdminSession, getSearchSession, getUserLang, getUserProfile,
+  incrementStats, isBlocked, isFavorite, listFavorites, listUsers, logSearch, recentSearchLogs, removeFavorite, saveRating,
+  saveSearchSession, setAdminSession, setBlocked, setUserLang, stats, type SearchSessionTitle
 } from './db';
 
-function isAdmin(env: Env, userId?: number): boolean {
-  if (!userId) return false;
-  return (env.ADMIN_IDS ?? '').split(',').map((id) => id.trim()).includes(String(userId));
+const PAGE_SIZE = 4;
+
+function isAdmin(env: Env, userId?: number): boolean { return !!userId && (env.ADMIN_IDS ?? '').split(',').map((x) => x.trim()).includes(String(userId)); }
+function escapeMd(v: unknown): string { return String(v ?? '').replace(/([_*`\[])/g, '\\$1'); }
+function userLabel(row: Record<string, unknown>): string { return row.username ? `@${row.username}` : (`${row.first_name ?? ''} ${row.last_name ?? ''}`.trim() || String(row.user_id)); }
+function toSessionTitle(t: ImdbTitle): SearchSessionTitle { return { id: t.id, title: displayTitle(t), year: year(t), type: mediaType(t), rating: ratingNumber(t) }; }
+
+function searchResultsText(query: string, normalized: string | undefined, results: SearchSessionTitle[], page: number, lang: Lang): string {
+  const total = results.length;
+  const start = page * PAGE_SIZE;
+  const items = results.slice(start, start + PAGE_SIZE);
+  const lines = items.map((r, i) => `*${start + i + 1}.* ${r.type === 'movie' ? '🎬' : '📺'} ${escapeMd(r.title)} (${r.year}) — IMDb: ${escapeMd(r.rating)}`);
+  return lang === 'en'
+    ? `🫧 *Glass Search Results*\n\n🔎 Query: ${escapeMd(query)}${normalized && normalized !== query ? `\n🧭 Normalized: ${escapeMd(normalized)}` : ''}\n📌 Found: *${total}* result(s)\n📄 Page: *${page + 1}/${Math.max(1, Math.ceil(total / PAGE_SIZE))}*\n\n${lines.join('\n')}`
+    : `🫧 *نتایج جستجوی شیشه‌ای*\n\n🔎 عبارت: ${escapeMd(query)}${normalized && normalized !== query ? `\n🧭 معادل جستجو: ${escapeMd(normalized)}` : ''}\n📌 تعداد نتایج یافت‌شده: *${total}*\n📄 صفحه: *${page + 1}/${Math.max(1, Math.ceil(total / PAGE_SIZE))}*\n\n${lines.join('\n')}`;
 }
 
-function escapeMd(value: unknown): string {
-  return String(value ?? '').replace(/([_*`\[])/g, '\\$1');
+function searchResultsKeyboard(sessionId: string, results: SearchSessionTitle[], page: number, lang: Lang) {
+  const totalPages = Math.max(1, Math.ceil(results.length / PAGE_SIZE));
+  const start = page * PAGE_SIZE;
+  const itemRows = results.slice(start, start + PAGE_SIZE).map((r, i) => ([{ text: `💎 ${start + i + 1} | ${r.type === 'movie' ? '🎬' : '📺'} ${r.title}`.slice(0, 58), callback_data: `d_${r.id}` }]));
+  const nav = [] as { text: string; callback_data: string }[];
+  if (page > 0) nav.push({ text: lang === 'en' ? '⬅️ Previous' : '⬅️ قبلی', callback_data: `sp_${sessionId}_${page - 1}` });
+  if (page + 1 < totalPages) nav.push({ text: lang === 'en' ? 'Next ➡️' : 'بعدی ➡️', callback_data: `sp_${sessionId}_${page + 1}` });
+  if (nav.length) itemRows.push(nav);
+  itemRows.push([{ text: lang === 'en' ? '🏠 Home' : '🏠 خانه', callback_data: 'home' }]);
+  return { inline_keyboard: itemRows };
 }
 
-function userLabel(row: Record<string, unknown>): string {
-  const username = row.username ? `@${row.username}` : '';
-  const name = `${row.first_name ?? ''} ${row.last_name ?? ''}`.trim();
-  return username || name || String(row.user_id);
+function movieForm(details: AiMovieDetails, loading = false): string {
+  const load = loading ? '⏳ ' : '';
+  return `| 🎬 | - Movie Title: ${escapeMd(details.title)}\n\n` +
+    `| ⭐ | - IMDb Rating: ${escapeMd(details.imdbRating)}\n\n` +
+    `| 🍅 | - Rotten Tomatoes: ${load}${escapeMd(details.rottenTomatoes)}\n\n` +
+    `| 🎭 | - Genre: ${escapeMd(details.genre)}\n\n` +
+    `| ⏱️ | - Runtime: ${escapeMd(details.runtime)}\n\n` +
+    `| 📆 | - Release Year: ${escapeMd(details.releaseYear)}\n\n` +
+    `| 📌 | - خلاصه داستان:\n\n${load}${escapeMd(details.persianSummary)}`.slice(0, 1020);
 }
 
-function richTitleCaption(title: ImdbTitle, lang: Lang): string {
-  const english = displayTitle(title);
-  const fa = persianDisplayName(english);
-  const nameLine = lang === 'en'
-    ? `*${escapeMd(english)}*${fa ? `\n_${escapeMd(fa)}_` : ''}`
-    : `*${escapeMd(fa ?? english)}*${fa ? `\n_${escapeMd(english)}_` : ''}`;
-  const genres = title.genres?.length ? title.genres.join('، ') : (lang === 'en' ? 'Unknown' : 'نامشخص');
-  const plot = title.plot || title.description || (lang === 'en' ? 'No overview is available.' : 'توضیحاتی موجود نیست.');
-  const typeIcon = mediaType(title) === 'movie' ? '🎬' : '📺';
-  const typeText = mediaType(title) === 'movie' ? (lang === 'en' ? 'Movie' : 'فیلم') : (lang === 'en' ? 'TV Series' : 'سریال');
-  return `${typeIcon} ${nameLine}\n\n` +
-    `╭─ 💠 *${lang === 'en' ? 'Glass Info Card' : 'کارت شیشه‌ای اطلاعات'}*\n` +
-    `├ 🗓 ${lang === 'en' ? 'Year' : 'سال'}: *${year(title)}*\n` +
-    `├ ⭐ IMDb: *${escapeMd(rating(title))}*\n` +
-    `├ 🎭 ${lang === 'en' ? 'Genres' : 'ژانر'}: ${escapeMd(genres)}\n` +
-    `╰─ 🧩 ${lang === 'en' ? 'Type' : 'نوع'}: ${typeText}\n\n` +
-    `📝 *${lang === 'en' ? 'Overview' : 'خلاصه'}*\n${escapeMd(plot).slice(0, 1350)}`;
-}
-
-function compactSearchCaption(title: ImdbTitle, index: number, query: string, lang: Lang): string {
-  const english = displayTitle(title);
-  const fa = persianDisplayName(english);
-  const display = lang === 'en' ? english : (fa ?? english);
-  const typeIcon = mediaType(title) === 'movie' ? '🎬' : '📺';
-  const genres = title.genres?.slice(0, 4).join('، ') || (lang === 'en' ? 'Unknown' : 'نامشخص');
-  return `✨ *${lang === 'en' ? 'Result' : 'نتیجه'} ${index}* — ${typeIcon}\n` +
-    `*${escapeMd(display)}*${fa ? `\n_${escapeMd(english)}_` : ''}\n\n` +
-    `🫧 ${lang === 'en' ? 'Search' : 'جستجو'}: ${escapeMd(query)}\n` +
-    `🗓 ${year(title)}   ⭐ ${escapeMd(rating(title))}\n` +
-    `🎭 ${escapeMd(genres)}`;
-}
-
-async function reactToMessage(tg: TelegramAPI, message: TelegramMessage, emoji: string) {
-  await tg.setMessageReaction(message.chat.id, message.message_id, emoji, true);
-}
-
-async function showTitle(env: Env, tg: TelegramAPI, chatId: number, userId: number, id: string, editMessageId?: number) {
-  const lang = await getUserLang(env, userId);
-  const title = await getTitle(id);
-  if (!title) return tg.sendMessage(chatId, lang === 'en' ? '❌ Title not found.' : '❌ اطلاعات این عنوان پیدا نشد.', mainMenu(lang));
-  await incrementStats(env, 'details');
-  const fav = await isFavorite(env, userId, id);
-  const text = richTitleCaption(title, lang);
-  const markup = titleActions(id, mediaType(title), fav, lang);
-  const poster = image(title);
-  if (editMessageId) {
-    await tg.editMessageText(chatId, editMessageId, text, markup).catch(() => tg.sendMessage(chatId, text, markup));
-  } else if (poster) {
-    await tg.sendPhoto(chatId, poster, text, markup).catch(() => tg.sendMessage(chatId, text, markup));
-  } else {
-    await tg.sendMessage(chatId, text, markup);
-  }
-}
+async function reactToMessage(tg: TelegramAPI, m: TelegramMessage, emoji: string) { await tg.setMessageReaction(m.chat.id, m.message_id, emoji, true); }
 
 async function bilingualSearch(query: string): Promise<{ normalized: string; results: ImdbTitle[] }> {
   const normalized = resolveQueryAlias(query);
-  const batches = await Promise.all([
-    searchTitles(normalized, 8),
-    normalized.toLowerCase() === query.trim().toLowerCase() ? Promise.resolve([]) : searchTitles(query, 5)
-  ]);
+  const [a, b] = await Promise.all([searchTitles(normalized, 16), normalized.toLowerCase() === query.trim().toLowerCase() ? [] : searchTitles(query, 8)]);
   const seen = new Set<string>();
   const results: ImdbTitle[] = [];
-  for (const title of batches.flat()) {
-    if (!title.id || seen.has(title.id)) continue;
-    seen.add(title.id);
-    results.push(title);
-  }
-  return { normalized, results: results.slice(0, 8) };
+  for (const item of [...a, ...b]) if (item.id && !seen.has(item.id)) { seen.add(item.id); results.push(item); }
+  return { normalized, results: results.slice(0, 20) };
 }
 
 async function handleSearch(env: Env, tg: TelegramAPI, message: TelegramMessage, query: string) {
@@ -119,31 +69,39 @@ async function handleSearch(env: Env, tg: TelegramAPI, message: TelegramMessage,
   const { normalized, results } = await bilingualSearch(query);
   await logSearch(env, message.from?.id, query, normalized, lang, results.length);
   if (!results.length) return tg.sendMessage(message.chat.id, t(lang, 'noResults'), mainMenu(lang));
+  const sessionResults = results.map(toSessionTitle);
+  const sessionId = await saveSearchSession(env, message.from?.id, query, normalized, lang, sessionResults);
+  return tg.sendMessage(message.chat.id, searchResultsText(query, normalized, sessionResults, 0, lang), searchResultsKeyboard(sessionId, sessionResults, 0, lang));
+}
 
-  await tg.sendMessage(
-    message.chat.id,
-    lang === 'en'
-      ? `🫧 *Glass Search Results*\nQuery: ${escapeMd(query)}${normalized !== query ? `\nNormalized: ${escapeMd(normalized)}` : ''}`
-      : `🫧 *نتایج جستجوی شیشه‌ای*\nعبارت: ${escapeMd(query)}${normalized !== query ? `\nمعادل جستجو: ${escapeMd(normalized)}` : ''}`
-  );
-
-  for (const [index, title] of results.slice(0, 5).entries()) {
-    const markup = titleActions(title.id, mediaType(title), await isFavorite(env, message.from?.id ?? 0, title.id), lang);
-    const caption = compactSearchCaption(title, index + 1, query, lang);
-    const poster = image(title);
-    if (poster) await tg.sendPhoto(message.chat.id, poster, caption, markup).catch(() => tg.sendMessage(message.chat.id, caption, markup));
-    else await tg.sendMessage(message.chat.id, caption, markup);
+async function showTitle(env: Env, tg: TelegramAPI, chatId: number, userId: number, id: string, sourceMessageId?: number) {
+  const lang = await getUserLang(env, userId);
+  const title = await getTitle(id);
+  if (!title) return tg.sendMessage(chatId, lang === 'en' ? '❌ Title not found.' : '❌ اطلاعات این عنوان پیدا نشد.', mainMenu(lang));
+  await incrementStats(env, 'details');
+  const fav = await isFavorite(env, userId, id);
+  const markup = titleActions(id, mediaType(title), fav, lang);
+  const loading = loadingDetails(title);
+  const poster = image(title);
+  let sent: any;
+  if (poster) sent = await tg.sendPhoto(chatId, poster, movieForm(loading, true), markup).catch(() => tg.sendMessage(chatId, movieForm(loading, true), markup));
+  else sent = await tg.sendMessage(chatId, movieForm(loading, true), markup);
+  if (sourceMessageId) await tg.setMessageReaction(chatId, sourceMessageId, '🎬', true);
+  const messageId = sent?.result?.message_id;
+  try {
+    const enriched = await enrichMovie(env, title);
+    if (messageId && poster) await tg.editMessageCaption(chatId, messageId, movieForm(enriched.details), markup);
+    else if (messageId) await tg.editMessageText(chatId, messageId, movieForm(enriched.details), markup);
+  } catch {
+    // keep loading/basic message if AI fails
   }
 }
 
 async function showProfile(env: Env, tg: TelegramAPI, chatId: number, userId: number) {
   const lang = await getUserLang(env, userId);
-  const profile = await getUserProfile(env, userId);
-  if (!profile) return tg.sendMessage(chatId, lang === 'en' ? 'Profile not found.' : 'پروفایل پیدا نشد.', mainMenu(lang));
-  const name = userLabel(profile as unknown as Record<string, unknown>);
-  const text = lang === 'en'
-    ? `👤 *Your Profile*\n\n🆔 ID: \`${profile.user_id}\`\n👁 Name: ${escapeMd(name)}\n🌐 Language: *${profile.language === 'en' ? 'English' : 'Persian'}*\n📅 Joined: ${profile.join_date ?? '-'}\n🕒 Last seen: ${profile.last_seen ?? '-'}\n💬 Messages: ${profile.message_count ?? 0}\n🔍 Searches: ${profile.searches_count ?? 0}\n❤️ Favorites: ${profile.favorites_count ?? 0}\n⭐ Ratings: ${profile.ratings_count ?? 0}`
-    : `👤 *پروفایل شما*\n\n🆔 آیدی: \`${profile.user_id}\`\n👁 نام: ${escapeMd(name)}\n🌐 زبان: *${profile.language === 'en' ? 'انگلیسی' : 'فارسی'}*\n📅 عضویت: ${profile.join_date ?? '-'}\n🕒 آخرین فعالیت: ${profile.last_seen ?? '-'}\n💬 پیام‌ها: ${profile.message_count ?? 0}\n🔍 جستجوها: ${profile.searches_count ?? 0}\n❤️ علاقه‌مندی‌ها: ${profile.favorites_count ?? 0}\n⭐ امتیازها: ${profile.ratings_count ?? 0}`;
+  const p = await getUserProfile(env, userId);
+  if (!p) return tg.sendMessage(chatId, 'پروفایل پیدا نشد.', mainMenu(lang));
+  const text = `👤 *پروفایل شما*\n\n🆔 آیدی: \`${p.user_id}\`\n👁 نام: ${escapeMd(userLabel(p as any))}\n🌐 زبان: *${p.language === 'en' ? 'English' : 'فارسی'}*\n📅 عضویت: ${p.join_date ?? '-'}\n🕒 آخرین فعالیت: ${p.last_seen ?? '-'}\n💬 پیام‌ها: ${p.message_count ?? 0}\n🔍 جستجوها: ${p.searches_count ?? 0}\n❤️ علاقه‌مندی‌ها: ${p.favorites_count ?? 0}\n⭐ امتیازها: ${p.ratings_count ?? 0}`;
   return tg.sendMessage(chatId, text, profileKeyboard(lang));
 }
 
@@ -151,200 +109,123 @@ async function showFavorites(env: Env, tg: TelegramAPI, chatId: number, userId: 
   const lang = await getUserLang(env, userId);
   const rows = await listFavorites(env, userId);
   if (!rows.length) return tg.sendMessage(chatId, t(lang, 'favoritesEmpty'), mainMenu(lang));
-  const buttons = rows.map((row: Record<string, unknown>) => [{
-    text: `${row.media_type === 'movie' ? '🎬' : '📺'} ${row.title}`,
-    callback_data: `details_${row.media_type}_${row.title_id}`
-  }]);
-  buttons.push([{ text: lang === 'en' ? '🔙 Back' : '🔙 بازگشت', callback_data: 'home' }]);
-  return tg.sendMessage(chatId, lang === 'en' ? '❤️ *Your Favorites*' : '❤️ *علاقه‌مندی‌های شما*', { inline_keyboard: buttons });
-}
-
-async function showAdminUsers(env: Env, tg: TelegramAPI, chatId: number, offset: number) {
-  const { users, total, limit } = await listUsers(env, offset, 8);
-  const rows = users.map((u) => [{ text: `${u.is_blocked ? '⛔️' : '👤'} ${userLabel(u as unknown as Record<string, unknown>)} — ${u.user_id}`, callback_data: `admin_user_${u.user_id}` }]);
-  const nav = [];
-  if (offset > 0) nav.push({ text: '⬅️ قبلی', callback_data: `admin_users_${Math.max(0, offset - limit)}` });
-  if (offset + limit < total) nav.push({ text: 'بعدی ➡️', callback_data: `admin_users_${offset + limit}` });
-  if (nav.length) rows.push(nav);
-  rows.push([{ text: '👑 پنل مدیریت', callback_data: 'admin_home' }]);
-  await tg.sendMessage(chatId, `👥 *کاربران*\n\nنمایش ${offset + 1} تا ${Math.min(offset + limit, total)} از ${total}`, { inline_keyboard: rows });
-}
-
-async function showAdminUser(env: Env, tg: TelegramAPI, chatId: number, userId: number) {
-  const profile = await getUserProfile(env, userId);
-  if (!profile) return tg.sendMessage(chatId, '❌ کاربر پیدا نشد.', adminMenu());
-  const text = `👤 *جزئیات کاربر*\n\n🆔 ID: \`${profile.user_id}\`\n👁 نام: ${escapeMd(userLabel(profile as unknown as Record<string, unknown>))}\n🌐 زبان: ${profile.language}\n⛔️ مسدود: ${profile.is_blocked ? 'بله' : 'خیر'}\n📅 عضویت: ${profile.join_date ?? '-'}\n🕒 آخرین فعالیت: ${profile.last_seen ?? '-'}\n💬 پیام‌ها: ${profile.message_count ?? 0}\n🔍 جستجوها: ${profile.searches_count ?? 0}\n❤️ علاقه‌مندی‌ها: ${profile.favorites_count ?? 0}\n⭐ امتیازها: ${profile.ratings_count ?? 0}`;
-  return tg.sendMessage(chatId, text, adminUserActions(userId, Boolean(profile.is_blocked)));
+  const buttons = rows.map((r: any) => [{ text: `${r.media_type === 'movie' ? '🎬' : '📺'} ${r.title}`, callback_data: `d_${r.title_id}` }]);
+  buttons.push([{ text: '🏠 خانه', callback_data: 'home' }]);
+  return tg.sendMessage(chatId, '❤️ *علاقه‌مندی‌های شما*', { inline_keyboard: buttons });
 }
 
 async function showAdminStats(env: Env, tg: TelegramAPI, chatId: number) {
   const s = await stats(env);
-  const text = `📊 *داشبورد مدیریت*\n\n👥 کل کاربران: ${s.totalUsers}\n⛔️ کاربران مسدود: ${s.blockedUsers}\n❤️ کل علاقه‌مندی‌ها: ${s.totalFavorites}\n⭐ کل امتیازها: ${s.totalRatings}\n\n*۷ روز اخیر*\n🔍 جستجوها: ${s.searches}\n📄 جزئیات بازشده: ${s.details}\n❤️ علاقه‌مندی‌های جدید: ${s.favorites}\n🆕 کاربران جدید: ${s.new_users}`;
-  return tg.sendMessage(chatId, text, adminMenu());
+  return tg.sendMessage(chatId, `📊 *داشبورد مدیریت*\n\n👥 کل کاربران: ${s.totalUsers}\n⛔️ کاربران مسدود: ${s.blockedUsers}\n❤️ کل علاقه‌مندی‌ها: ${s.totalFavorites}\n⭐ کل امتیازها: ${s.totalRatings}\n\n*۷ روز اخیر*\n🔍 جستجوها: ${s.searches}\n📄 جزئیات: ${s.details}\n❤️ علاقه‌مندی جدید: ${s.favorites}\n🆕 کاربران جدید: ${s.new_users}`, adminMenu());
+}
+
+async function showAdminUsers(env: Env, tg: TelegramAPI, chatId: number, offset: number) {
+  const { users, total, limit } = await listUsers(env, offset, 8);
+  const rows = users.map((u) => [{ text: `${u.is_blocked ? '⛔️' : '👤'} ${userLabel(u as any)} — ${u.user_id}`, callback_data: `admin_user_${u.user_id}` }]);
+  const nav = [] as any[];
+  if (offset > 0) nav.push({ text: '⬅️ قبلی', callback_data: `admin_users_${Math.max(0, offset - limit)}` });
+  if (offset + limit < total) nav.push({ text: 'بعدی ➡️', callback_data: `admin_users_${offset + limit}` });
+  if (nav.length) rows.push(nav);
+  rows.push([{ text: '👑 پنل مدیریت', callback_data: 'admin_home' }]);
+  return tg.sendMessage(chatId, `👥 *کاربران*\nنمایش ${offset + 1} تا ${Math.min(offset + limit, total)} از ${total}`, { inline_keyboard: rows });
+}
+
+async function showAdminUser(env: Env, tg: TelegramAPI, chatId: number, userId: number) {
+  const p = await getUserProfile(env, userId);
+  if (!p) return tg.sendMessage(chatId, '❌ کاربر پیدا نشد.', adminMenu());
+  const text = `👤 *جزئیات کاربر*\n🆔 ID: \`${p.user_id}\`\n👁 نام: ${escapeMd(userLabel(p as any))}\n🌐 زبان: ${p.language}\n⛔️ مسدود: ${p.is_blocked ? 'بله' : 'خیر'}\n📅 عضویت: ${p.join_date ?? '-'}\n🕒 آخرین فعالیت: ${p.last_seen ?? '-'}\n💬 پیام‌ها: ${p.message_count ?? 0}\n🔍 جستجوها: ${p.searches_count ?? 0}\n❤️ علاقه‌مندی‌ها: ${p.favorites_count ?? 0}`;
+  return tg.sendMessage(chatId, text, adminUserActions(userId, Boolean(p.is_blocked)));
 }
 
 async function showAdminLogs(env: Env, tg: TelegramAPI, chatId: number) {
   const logs = await recentSearchLogs(env, 15);
-  if (!logs.length) return tg.sendMessage(chatId, '🔎 هنوز لاگی ثبت نشده.', adminMenu());
-  const text = logs.map((log, i) => `${i + 1}. \`${escapeMd(log.query)}\` → ${escapeMd(log.normalized_query)} | ${log.results_count} نتیجه | ${escapeMd(userLabel(log))}`).join('\n');
+  const text = logs.length ? logs.map((l: any, i) => `${i + 1}. \`${escapeMd(l.query)}\` → ${escapeMd(l.normalized_query)} | ${l.results_count} نتیجه | ${escapeMd(userLabel(l))}`).join('\n') : 'لاگی وجود ندارد.';
   return tg.sendMessage(chatId, `🔎 *آخرین جستجوها*\n\n${text}`, adminMenu());
 }
 
-async function handleBroadcastMessage(env: Env, tg: TelegramAPI, message: TelegramMessage, lang: Lang): Promise<boolean> {
-  const userId = message.from?.id;
-  if (!userId || !isAdmin(env, userId)) return false;
-  const session = await getAdminSession(env, userId);
+async function handleBroadcastMessage(env: Env, tg: TelegramAPI, m: TelegramMessage, lang: Lang): Promise<boolean> {
+  const uid = m.from?.id;
+  if (!uid || !isAdmin(env, uid)) return false;
+  const session = await getAdminSession(env, uid);
   if (session?.action !== 'broadcast') return false;
-  const text = message.text?.trim() ?? '';
-  if (!text) return true;
-  if (['لغو', 'cancel', '/cancel'].includes(text.toLowerCase())) {
-    await clearAdminSession(env, userId);
-    await tg.sendMessage(message.chat.id, t(lang, 'broadcastCanceled'), adminMenu());
-    return true;
-  }
+  const text = m.text?.trim() ?? '';
+  if (['لغو', 'cancel', '/cancel'].includes(text.toLowerCase())) { await clearAdminSession(env, uid); await tg.sendMessage(m.chat.id, t(lang, 'broadcastCanceled'), adminMenu()); return true; }
   const ids = await allActiveUserIds(env, 1000);
   let sent = 0;
-  for (const id of ids) {
-    if (id === userId) continue;
-    try {
-      await tg.sendMessage(id, `📢 *پیام مدیریت MegaufoBot*\n\n${escapeMd(text)}`);
-      sent++;
-    } catch {
-      // Ignore blocked/deleted chats.
-    }
-  }
-  await clearAdminSession(env, userId);
-  await tg.sendMessage(message.chat.id, `${t(lang, 'broadcastDone')}\nارسال موفق: ${sent}`, adminMenu());
+  for (const id of ids) if (id !== uid) try { await tg.sendMessage(id, `📢 *پیام مدیریت MegaufoBot*\n\n${escapeMd(text)}`); sent++; } catch {}
+  await clearAdminSession(env, uid);
+  await tg.sendMessage(m.chat.id, `${t(lang, 'broadcastDone')}\nارسال موفق: ${sent}`, adminMenu());
   return true;
 }
 
-async function handleMessage(env: Env, tg: TelegramAPI, message: TelegramMessage) {
-  await addUser(env, message.from);
-  const lang = await getUserLang(env, message.from?.id);
-  if (await isBlocked(env, message.from?.id)) return tg.sendMessage(message.chat.id, t(lang, 'blocked'));
-  if (await handleBroadcastMessage(env, tg, message, lang)) return;
-  const text = (message.text ?? '').trim();
+async function handleMessage(env: Env, tg: TelegramAPI, m: TelegramMessage) {
+  await addUser(env, m.from);
+  const lang = await getUserLang(env, m.from?.id);
+  if (await isBlocked(env, m.from?.id)) return tg.sendMessage(m.chat.id, t(lang, 'blocked'));
+  if (await handleBroadcastMessage(env, tg, m, lang)) return;
+  const text = (m.text ?? '').trim();
   if (!text) return;
-
-  if (text === '/start') { await reactToMessage(tg, message, '👋'); return tg.sendMessage(message.chat.id, t(lang, 'welcome'), mainMenu(lang)); }
-  if (text === '/help') { await reactToMessage(tg, message, '💡'); return tg.sendMessage(message.chat.id, t(lang, 'help'), mainMenu(lang)); }
-  if (text === '/profile') { await reactToMessage(tg, message, '👤'); return showProfile(env, tg, message.chat.id, message.from?.id ?? 0); }
-  if (text === '/popular') { await reactToMessage(tg, message, '🌟'); return tg.sendMessage(message.chat.id, t(lang, 'choosePopular'), popularMenu(lang)); }
-  if (text === '/favorites') { await reactToMessage(tg, message, '❤️'); return showFavorites(env, tg, message.chat.id, message.from?.id ?? 0); }
-  if (text === '/admin') {
-    await reactToMessage(tg, message, '👑');
-    if (!isAdmin(env, message.from?.id)) return tg.sendMessage(message.chat.id, t(lang, 'adminDenied'));
-    return tg.sendMessage(message.chat.id, t(lang, 'adminTitle'), adminMenu());
-  }
-  await handleSearch(env, tg, message, text.replace(/^\/search\s*/i, ''));
+  if (text === '/start') { await reactToMessage(tg, m, '👋'); return tg.sendMessage(m.chat.id, t(lang, 'welcome'), mainMenu(lang)); }
+  if (text === '/help') { await reactToMessage(tg, m, '💡'); return tg.sendMessage(m.chat.id, t(lang, 'help'), mainMenu(lang)); }
+  if (text === '/profile') { await reactToMessage(tg, m, '👤'); return showProfile(env, tg, m.chat.id, m.from?.id ?? 0); }
+  if (text === '/popular') { await reactToMessage(tg, m, '🌟'); return tg.sendMessage(m.chat.id, t(lang, 'choosePopular'), popularMenu(lang)); }
+  if (text === '/favorites') { await reactToMessage(tg, m, '❤️'); return showFavorites(env, tg, m.chat.id, m.from?.id ?? 0); }
+  if (text === '/admin') { await reactToMessage(tg, m, '👑'); return isAdmin(env, m.from?.id) ? tg.sendMessage(m.chat.id, t(lang, 'adminTitle'), adminMenu()) : tg.sendMessage(m.chat.id, t(lang, 'adminDenied')); }
+  return handleSearch(env, tg, m, text.replace(/^\/search\s*/i, ''));
 }
 
-async function handleCallback(env: Env, tg: TelegramAPI, callback: TelegramCallbackQuery) {
-  await addUser(env, callback.from);
-  const lang = await getUserLang(env, callback.from.id);
-  if (await isBlocked(env, callback.from.id)) return;
-  const data = callback.data ?? '';
-  const chatId = callback.message?.chat.id;
-  const messageId = callback.message?.message_id;
-  await tg.answerCallbackQuery(callback.id).catch(() => undefined);
+async function handleCallback(env: Env, tg: TelegramAPI, c: TelegramCallbackQuery) {
+  await addUser(env, c.from);
+  const lang = await getUserLang(env, c.from.id);
+  if (await isBlocked(env, c.from.id)) return;
+  const data = c.data ?? '';
+  const chatId = c.message?.chat.id;
+  const messageId = c.message?.message_id;
+  await tg.answerCallbackQuery(c.id).catch(() => undefined);
   if (!chatId) return;
 
   if (data === 'home') return tg.sendMessage(chatId, t(lang, 'welcome'), mainMenu(lang));
   if (data === 'help') return tg.sendMessage(chatId, t(lang, 'help'), mainMenu(lang));
   if (data === 'action_search') return tg.sendMessage(chatId, t(lang, 'searchPrompt'), mainMenu(lang));
   if (data === 'popular_menu') return tg.sendMessage(chatId, t(lang, 'choosePopular'), popularMenu(lang));
-  if (data === 'favorites') return showFavorites(env, tg, chatId, callback.from.id);
-  if (data === 'profile') return showProfile(env, tg, chatId, callback.from.id);
-  if (data === 'lang_fa' || data === 'lang_en') {
-    const newLang: Lang = data === 'lang_en' ? 'en' : 'fa';
-    await setUserLang(env, callback.from.id, newLang);
-    return tg.sendMessage(chatId, t(newLang, 'languageUpdated'), profileKeyboard(newLang));
+  if (data === 'favorites') return showFavorites(env, tg, chatId, c.from.id);
+  if (data === 'profile') return showProfile(env, tg, chatId, c.from.id);
+  if (data === 'lang_fa' || data === 'lang_en') { const newLang = data === 'lang_en' ? 'en' : 'fa'; await setUserLang(env, c.from.id, newLang); return tg.sendMessage(chatId, t(newLang, 'languageUpdated'), profileKeyboard(newLang)); }
+
+  if (data.startsWith('sp_')) {
+    const [, sid, pageRaw] = data.split('_');
+    const session = await getSearchSession(env, sid);
+    if (!session) return tg.sendMessage(chatId, '❌ این صفحه جستجو منقضی شده است.', mainMenu(lang));
+    const page = Number(pageRaw || 0);
+    return tg.editMessageText(chatId, messageId!, searchResultsText(session.query, session.normalized_query, session.results, page, session.language), searchResultsKeyboard(sid, session.results, page, session.language));
   }
 
-  if (data === 'admin_home') {
-    if (!isAdmin(env, callback.from.id)) return tg.sendMessage(chatId, t(lang, 'adminDenied'));
-    return tg.sendMessage(chatId, t(lang, 'adminTitle'), adminMenu());
-  }
-  if (data === 'admin_stats') {
-    if (!isAdmin(env, callback.from.id)) return tg.sendMessage(chatId, t(lang, 'adminDenied'));
-    return showAdminStats(env, tg, chatId);
-  }
-  if (data.startsWith('admin_users_')) {
-    if (!isAdmin(env, callback.from.id)) return tg.sendMessage(chatId, t(lang, 'adminDenied'));
-    return showAdminUsers(env, tg, chatId, Number(data.split('_')[2] ?? 0));
-  }
-  if (data.startsWith('admin_user_') && !data.startsWith('admin_user_favs_')) {
-    if (!isAdmin(env, callback.from.id)) return tg.sendMessage(chatId, t(lang, 'adminDenied'));
-    return showAdminUser(env, tg, chatId, Number(data.split('_')[2]));
-  }
-  if (data.startsWith('admin_block_') || data.startsWith('admin_unblock_')) {
-    if (!isAdmin(env, callback.from.id)) return tg.sendMessage(chatId, t(lang, 'adminDenied'));
-    const parts = data.split('_');
-    const block = parts[1] === 'block';
-    const targetId = Number(parts[2]);
-    await setBlocked(env, targetId, block);
-    return showAdminUser(env, tg, chatId, targetId);
-  }
-  if (data === 'admin_broadcast') {
-    if (!isAdmin(env, callback.from.id)) return tg.sendMessage(chatId, t(lang, 'adminDenied'));
-    await setAdminSession(env, callback.from.id, 'broadcast');
-    return tg.sendMessage(chatId, t(lang, 'broadcastPrompt'), adminMenu());
-  }
-  if (data === 'admin_logs') {
-    if (!isAdmin(env, callback.from.id)) return tg.sendMessage(chatId, t(lang, 'adminDenied'));
-    return showAdminLogs(env, tg, chatId);
-  }
-  if (data.startsWith('admin_user_favs_')) {
-    if (!isAdmin(env, callback.from.id)) return tg.sendMessage(chatId, t(lang, 'adminDenied'));
-    const targetId = Number(data.split('_')[3]);
-    return showFavorites(env, tg, chatId, targetId);
-  }
+  if (data.startsWith('d_')) return showTitle(env, tg, chatId, c.from.id, data.slice(2), messageId);
+  if (data.startsWith('details_')) { const parts = data.split('_'); return showTitle(env, tg, chatId, c.from.id, parts[2], messageId); }
 
   if (data === 'popular_movie' || data === 'popular_tv') {
     const titles = await listPopular(data === 'popular_movie' ? 'MOVIE' : 'TV_SERIES');
-    for (const [i, title] of titles.slice(0, 5).entries()) {
-      const caption = compactSearchCaption(title, i + 1, data === 'popular_movie' ? 'popular movies' : 'popular tv', lang);
-      const markup = titleActions(title.id, mediaType(title), await isFavorite(env, callback.from.id, title.id), lang);
-      if (image(title)) await tg.sendPhoto(chatId, image(title)!, caption, markup).catch(() => tg.sendMessage(chatId, caption, markup));
-      else await tg.sendMessage(chatId, caption, markup);
-    }
-    return;
+    const results = titles.map(toSessionTitle);
+    const sid = await saveSearchSession(env, c.from.id, data, data, lang, results);
+    return tg.sendMessage(chatId, searchResultsText(data, data, results, 0, lang), searchResultsKeyboard(sid, results, 0, lang));
   }
 
-  if (data.startsWith('details_')) {
-    const [, , id] = data.split('_');
-    return showTitle(env, tg, chatId, callback.from.id, id, messageId);
-  }
-  if (data.startsWith('fav_')) {
-    const id = data.slice(4);
-    const title = await getTitle(id);
-    if (!title) return tg.sendMessage(chatId, '❌ Title not found.');
-    await addFavorite(env, callback.from.id, title);
-    await tg.setMessageReaction(chatId, messageId ?? 0, '❤️', true);
-    return showTitle(env, tg, chatId, callback.from.id, id, messageId);
-  }
-  if (data.startsWith('unfav_')) {
-    const id = data.slice(6);
-    await removeFavorite(env, callback.from.id, id);
-    return showTitle(env, tg, chatId, callback.from.id, id, messageId);
-  }
-  if (data.startsWith('rate_')) {
-    const [, type, id] = data.split('_');
-    return tg.editMessageText(chatId, messageId!, lang === 'en' ? '⭐ Rate from 1 to 10:' : '⭐ از ۱ تا ۱۰ چه امتیازی می‌دهی؟', ratingKeyboard(id, type, lang));
-  }
-  if (data.startsWith('rated_')) {
-    const [, type, id, score] = data.split('_');
-    await saveRating(env, callback.from.id, id, type, Number(score));
-    await tg.setMessageReaction(chatId, messageId ?? 0, '🔥', true);
-    await tg.sendMessage(chatId, lang === 'en' ? `✅ Your ${score}/10 rating was saved.` : `✅ امتیاز ${score}/10 ثبت شد.`);
-    return showTitle(env, tg, chatId, callback.from.id, id, messageId);
-  }
-  if (data.startsWith('credits_')) {
-    const id = data.slice(8);
-    const names = await listCredits(id);
-    return tg.sendMessage(chatId, names.length ? `🎭 *${lang === 'en' ? 'Cast / Crew' : 'بازیگران / عوامل'}*\n\n${names.map(escapeMd).join('\n')}` : (lang === 'en' ? '❌ Credits are unavailable.' : '❌ اطلاعات بازیگران در دسترس نیست.'), mainMenu(lang));
-  }
-  return tg.sendMessage(chatId, lang === 'en' ? '⚠️ Unsupported option.' : '⚠️ این گزینه هنوز پشتیبانی نمی‌شود.', mainMenu(lang));
+  if (data.startsWith('fav_')) { const id = data.slice(4); const title = await getTitle(id); if (title) await addFavorite(env, c.from.id, title); if (messageId) await tg.setMessageReaction(chatId, messageId, '❤️', true); return showTitle(env, tg, chatId, c.from.id, id, messageId); }
+  if (data.startsWith('unfav_')) { const id = data.slice(6); await removeFavorite(env, c.from.id, id); return showTitle(env, tg, chatId, c.from.id, id, messageId); }
+  if (data.startsWith('rate_')) { const [, type, id] = data.split('_'); return tg.editMessageText(chatId, messageId!, '⭐ از ۱ تا ۱۰ چه امتیازی می‌دهی؟', ratingKeyboard(id, type, lang)); }
+  if (data.startsWith('rated_')) { const [, type, id, score] = data.split('_'); await saveRating(env, c.from.id, id, type, Number(score)); if (messageId) await tg.setMessageReaction(chatId, messageId, '🔥', true); await tg.sendMessage(chatId, `✅ امتیاز ${score}/10 ثبت شد.`); return showTitle(env, tg, chatId, c.from.id, id, messageId); }
+  if (data.startsWith('credits_')) { const names = await listCredits(data.slice(8)); return tg.sendMessage(chatId, names.length ? `🎭 *بازیگران / عوامل*\n\n${names.map(escapeMd).join('\n')}` : '❌ اطلاعات بازیگران در دسترس نیست.', mainMenu(lang)); }
+
+  if (data === 'admin_home') return isAdmin(env, c.from.id) ? tg.sendMessage(chatId, t(lang, 'adminTitle'), adminMenu()) : tg.sendMessage(chatId, t(lang, 'adminDenied'));
+  if (data === 'admin_stats') return isAdmin(env, c.from.id) ? showAdminStats(env, tg, chatId) : tg.sendMessage(chatId, t(lang, 'adminDenied'));
+  if (data.startsWith('admin_users_')) return isAdmin(env, c.from.id) ? showAdminUsers(env, tg, chatId, Number(data.split('_')[2] ?? 0)) : tg.sendMessage(chatId, t(lang, 'adminDenied'));
+  if (data.startsWith('admin_user_') && !data.startsWith('admin_user_favs_')) return isAdmin(env, c.from.id) ? showAdminUser(env, tg, chatId, Number(data.split('_')[2])) : tg.sendMessage(chatId, t(lang, 'adminDenied'));
+  if (data.startsWith('admin_block_') || data.startsWith('admin_unblock_')) { if (!isAdmin(env, c.from.id)) return tg.sendMessage(chatId, t(lang, 'adminDenied')); const parts = data.split('_'); const block = parts[1] === 'block'; const target = Number(parts[2]); await setBlocked(env, target, block); return showAdminUser(env, tg, chatId, target); }
+  if (data === 'admin_broadcast') { if (!isAdmin(env, c.from.id)) return tg.sendMessage(chatId, t(lang, 'adminDenied')); await setAdminSession(env, c.from.id, 'broadcast'); return tg.sendMessage(chatId, t(lang, 'broadcastPrompt'), adminMenu()); }
+  if (data === 'admin_logs') return isAdmin(env, c.from.id) ? showAdminLogs(env, tg, chatId) : tg.sendMessage(chatId, t(lang, 'adminDenied'));
+  if (data.startsWith('admin_user_favs_')) return isAdmin(env, c.from.id) ? showFavorites(env, tg, chatId, Number(data.split('_')[3])) : tg.sendMessage(chatId, t(lang, 'adminDenied'));
+
+  return tg.sendMessage(chatId, '⚠️ این گزینه هنوز پشتیبانی نمی‌شود.', mainMenu(lang));
 }
 
 async function handleUpdate(env: Env, update: TelegramUpdate) {
@@ -361,8 +242,7 @@ export default {
     const expectedPath = `/webhook/${env.WEBHOOK_SECRET ?? 'telegram'}`;
     if (url.pathname !== expectedPath) return new Response('Not found', { status: 404 });
     if (request.method !== 'POST') return new Response('Method not allowed', { status: 405 });
-    const update = await request.json<TelegramUpdate>();
-    await handleUpdate(env, update);
+    await handleUpdate(env, await request.json<TelegramUpdate>());
     return Response.json({ ok: true });
   }
 };
