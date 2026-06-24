@@ -141,20 +141,3 @@ export async function allActiveUserIds(env: Env, limit = 1000): Promise<number[]
   const { results } = await env.DB.prepare('SELECT user_id FROM users WHERE COALESCE(is_blocked,0) = 0 ORDER BY last_seen DESC LIMIT ?').bind(limit).all<{ user_id: number }>();
   return results.map((row) => row.user_id);
 }
-
-export type SearchSessionTitle = { id: string; title: string; year: string; type: 'movie' | 'tv'; rating: string };
-
-export async function saveSearchSession(env: Env, userId: number | undefined, query: string, normalizedQuery: string, language: Lang, results: SearchSessionTitle[]): Promise<string> {
-  const sessionId = crypto.randomUUID().replace(/-/g, '').slice(0, 12);
-  await env.DB.prepare('INSERT INTO search_sessions (session_id, user_id, query, normalized_query, language, results_json) VALUES (?, ?, ?, ?, ?, ?)')
-    .bind(sessionId, userId ?? null, query, normalizedQuery, language, JSON.stringify(results)).run();
-  return sessionId;
-}
-
-export async function getSearchSession(env: Env, sessionId: string): Promise<{ session_id: string; user_id?: number; query: string; normalized_query?: string; language: Lang; results: SearchSessionTitle[] } | null> {
-  const row = await env.DB.prepare('SELECT * FROM search_sessions WHERE session_id = ?').bind(sessionId).first<any>();
-  if (!row) return null;
-  try {
-    return { session_id: row.session_id, user_id: row.user_id, query: row.query, normalized_query: row.normalized_query, language: row.language === 'en' ? 'en' : 'fa', results: JSON.parse(row.results_json) };
-  } catch { return null; }
-}

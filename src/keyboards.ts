@@ -62,3 +62,20 @@ export function adminUserActions(userId: number, blocked: boolean) {
     [{ text: '🔙 لیست کاربران', callback_data: 'admin_users_0' }, { text: '👑 پنل مدیریت', callback_data: 'admin_home' }]
   ]);
 }
+
+export function searchResultsKeyboard(sessionId: string, page: number, total: number, perPage = 4) {
+  const start = page * perPage;
+  const end = Math.min(start + perPage, total);
+  const rows = [];
+  const resultButtons = [];
+  for (let index = start; index < end; index++) {
+    resultButtons.push({ text: `🫧 ${index + 1}`, callback_data: `r_${sessionId}_${index}` });
+  }
+  rows.push(resultButtons);
+  const nav = [];
+  if (page > 0) nav.push({ text: '⬅️ قبلی', callback_data: `s_${sessionId}_${page - 1}` });
+  if (end < total) nav.push({ text: page === 0 ? 'نتایج بیشتر ➡️' : 'بعدی ➡️', callback_data: `s_${sessionId}_${page + 1}` });
+  if (nav.length) rows.push(nav);
+  rows.push([{ text: '🏠 خانه', callback_data: 'home' }]);
+  return keyboard(rows);
+}

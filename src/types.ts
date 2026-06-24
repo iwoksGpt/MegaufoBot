@@ -2,10 +2,10 @@ export interface Env {
   TELEGRAM_TOKEN: string;
   ADMIN_IDS?: string;
   WEBHOOK_SECRET?: string;
+  DB: D1Database;
   DEEPSEEK_API_KEY?: string;
   OPENAI_API_KEY?: string;
   XAI_API_KEY?: string;
-  DB: D1Database;
 }
 
 export type TelegramUpdate = {
@@ -23,14 +23,16 @@ export type TelegramUser = {
   language_code?: string;
 };
 
-export type TelegramChat = { id: number; type: string };
+export type TelegramChat = {
+  id: number;
+  type: string;
+};
 
 export type TelegramMessage = {
   message_id: number;
   from?: TelegramUser;
   chat: TelegramChat;
   text?: string;
-  caption?: string;
 };
 
 export type TelegramCallbackQuery = {
@@ -40,8 +42,15 @@ export type TelegramCallbackQuery = {
   data?: string;
 };
 
-export type InlineKeyboardButton = { text: string; callback_data?: string; url?: string };
-export type ReplyMarkup = { inline_keyboard?: InlineKeyboardButton[][] };
+export type InlineKeyboardButton = {
+  text: string;
+  callback_data?: string;
+  url?: string;
+};
+
+export type ReplyMarkup = {
+  inline_keyboard?: InlineKeyboardButton[][];
+};
 
 export type ImdbTitle = {
   id: string;
@@ -56,16 +65,6 @@ export type ImdbTitle = {
   genres?: string[];
   rating?: { aggregateRating?: number; voteCount?: number };
   runtimeMinutes?: number;
-  countriesOfOrigin?: string[];
+  countries?: string[];
   releaseDate?: string;
-};
-
-export type AiMovieDetails = {
-  title: string;
-  imdbRating: string;
-  rottenTomatoes: string;
-  genre: string;
-  runtime: string;
-  releaseYear: string;
-  persianSummary: string;
 };
